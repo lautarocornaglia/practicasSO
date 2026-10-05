@@ -4,7 +4,6 @@ from hardware import *
 import log
 
 
-
 ## emulates a compiled program
 class Program():
 
@@ -80,6 +79,132 @@ class IoDeviceController():
     def __repr__(self):
         return "IoDeviceController for {deviceID} running: {currentPCB} waiting: {waiting_queue}".format(deviceID=self._device.deviceId, currentPCB=self._currentPCB, waiting_queue=self._waiting_queue)
 
+
+## estados posibles de un proceso
+STATE_NEW = "new"
+STATE_READY = "ready"
+STATE_RUNNING = "running"
+STATE_WAITING = "waiting"
+STATE_TERMINATED = "terminated"
+
+
+## Process Control Block: la ficha de cada proceso
+class PCB():
+
+    def __init__(self, pid, baseDir, path):
+        self._pid = pid
+        self._baseDir = baseDir
+        self._pc = 0
+        self._state = STATE_NEW
+        self._path = path
+
+    @property
+    def pid(self):
+        return self._pid
+
+    @property
+    def baseDir(self):
+        return self._baseDir
+
+    @property
+    def pc(self):
+        return self._pc
+
+    @pc.setter
+    def pc(self, pc):
+        self._pc = pc
+
+    @property
+    def state(self):
+        return self._state
+
+    @state.setter
+    def state(self, state):
+        self._state = state
+
+    @property
+    def path(self):
+        return self._path
+
+    def __repr__(self):
+        return "PCB(pid={pid}, path={path}, baseDir={base}, pc={pc}, state={state})".format(
+            pid=self._pid, path=self._path, base=self._baseDir, pc=self._pc, state=self._state)
+
+
+## tabla con todos los PCB del sistema
+class PCBTable():
+
+    def __init__(self):
+        self._table = {}
+        self._nextPid = 0
+
+    def get(self, pid):
+        return self._table[pid]
+
+    def add(self, pcb):
+        self._table[pcb.pid] = pcb
+
+    def remove(self, pid):
+        del self._table[pid]
+
+    def getNewPID(self):
+        # los pid no se reutilizan, siempre sube
+        pid = self._nextPid
+        self._nextPid += 1
+        return pid
+
+    def __repr__(self):
+        return "PCBTable({t})".format(t=list(self._table.values()))
+
+
+## cola de procesos listos para correr (fifo)
+class ReadyQueue():
+
+    def __init__(self):
+        self._queue = []
+
+    def add(self, pcb):
+        self._queue.append(pcb)
+
+    def next(self):
+        # saca el primero de la cola
+        return self._queue.pop(0)
+
+    def isEmpty(self):
+        return len(self._queue) == 0
+
+    def __repr__(self):
+        return "ReadyQueue({q})".format(q=self._queue)
+
+
+## carga los programas en memoria
+class Loader():
+
+    def __init__(self):
+        # proxima celda libre de la memoria
+        self._nextDir = 0
+
+    def load(self, program):
+        baseDir = self._nextDir
+        for index in range(0, len(program.instructions)):
+            HARDWARE.memory.write(baseDir + index, program.instructions[index])
+        self._nextDir = baseDir + len(program.instructions)
+        return baseDir
+
+
+## pone y saca procesos de la cpu (cambio de contexto)
+class Dispatcher():
+
+    def load(self, pcb):
+        HARDWARE.cpu.pc = pcb.pc
+        HARDWARE.mmu.baseDir = pcb.baseDir
+
+    def save(self, pcb):
+        # guardo el pc en el pcb y dejo la cpu idle
+        pcb.pc = HARDWARE.cpu.pc
+        HARDWARE.cpu.pc = -1
+
+
 ## emulates the  Interruptions Handlers
 class AbstractInterruptionHandler():
     def __init__(self, kernel):
@@ -93,28 +218,37 @@ class AbstractInterruptionHandler():
         log.logger.error("-- EXECUTE MUST BE OVERRIDEN in class {classname}".format(classname=self.__class__.__name__))
 
 
+## TODO: los 4 handlers quedan para el companiero
+class NewInterruptionHandler(AbstractInterruptionHandler):
+
+    def execute(self, irq):
+        program = irq.parameters
+        log.logger.info("NEW de {name} (falta implementar)".format(name=program.name))
+        # TODO: loader.load, crear pcb, agregarlo a la tabla,
+        # si la cpu esta idle dispatcher.load, sino a la ready queue
+
+
 class KillInterruptionHandler(AbstractInterruptionHandler):
 
     def execute(self, irq):
-        log.logger.info(" Program Finished ")
-        HARDWARE.cpu.pc = -1  ## dejamos el CPU IDLE
+        log.logger.info("KILL (falta implementar)")
+        # TODO: pcb a terminated, sacar de running, buscar el proximo en ready
+
 
 class IoInInterruptionHandler(AbstractInterruptionHandler):
 
     def execute(self, irq):
-        operation = irq.parameters
-        pcb = {'pc': HARDWARE.cpu.pc} # porque hacemos esto ???
-        HARDWARE.cpu.pc = -1   ## dejamos el CPU IDLE
-        self.kernel.ioDeviceController.runOperation(pcb, operation)
-        log.logger.info(self.kernel.ioDeviceController)
+        log.logger.info("IO_IN (falta implementar)")
+        # TODO: dispatcher.save, pcb a waiting, mandarlo al ioDeviceController,
+        # buscar el proximo en ready
 
 
 class IoOutInterruptionHandler(AbstractInterruptionHandler):
 
     def execute(self, irq):
-        pcb = self.kernel.ioDeviceController.getFinishedPCB()
-        HARDWARE.cpu.pc = pcb['pc']
-        log.logger.info(self.kernel.ioDeviceController)
+        log.logger.info("IO_OUT (falta implementar)")
+        # TODO: getFinishedPCB, pcb a ready, si la cpu esta idle hacerlo correr,
+        # sino a la ready queue
 
 
 # emulates the core of an Operative System
@@ -122,6 +256,9 @@ class Kernel():
 
     def __init__(self):
         ## setup interruption handlers
+        newHandler = NewInterruptionHandler(self)
+        HARDWARE.interruptVector.register(NEW_INTERRUPTION_TYPE, newHandler)
+
         killHandler = KillInterruptionHandler(self)
         HARDWARE.interruptVector.register(KILL_INTERRUPTION_TYPE, killHandler)
 
@@ -134,27 +271,45 @@ class Kernel():
         ## controls the Hardware's I/O Device
         self._ioDeviceController = IoDeviceController(HARDWARE.ioDevice)
 
+        ## componentes del so
+        self._loader = Loader()
+        self._dispatcher = Dispatcher()
+        self._pcbTable = PCBTable()
+        self._readyQueue = ReadyQueue()
+        self._runningPCB = None
 
     @property
     def ioDeviceController(self):
         return self._ioDeviceController
 
-    def load_program(self, program):
-        # loads the program in main memory
-        progSize = len(program.instructions)
-        for index in range(0, progSize):
-            inst = program.instructions[index]
-            HARDWARE.memory.write(index, inst)
+    @property
+    def loader(self):
+        return self._loader
+
+    @property
+    def dispatcher(self):
+        return self._dispatcher
+
+    @property
+    def pcbTable(self):
+        return self._pcbTable
+
+    @property
+    def readyQueue(self):
+        return self._readyQueue
+
+    @property
+    def runningPCB(self):
+        return self._runningPCB
+
+    @runningPCB.setter
+    def runningPCB(self, pcb):
+        self._runningPCB = pcb
 
     ## emulates a "system call" for programs execution
     def run(self, program):
-        self.load_program(program)
-        log.logger.info("\n Executing program: {name}".format(name=program.name))
-        log.logger.info(HARDWARE)
-
-        # set CPU program counter at program's first intruction
-        HARDWARE.cpu.pc = 0
-
+        newIRQ = IRQ(NEW_INTERRUPTION_TYPE, program)
+        HARDWARE.interruptVector.handle(newIRQ)
 
     def __repr__(self):
         return "Kernel "
