@@ -219,37 +219,98 @@ class AbstractInterruptionHandler():
 
 
 ## TODO: los 4 handlers quedan para el companiero
+
 class NewInterruptionHandler(AbstractInterruptionHandler):
 
     def execute(self, irq):
         program = irq.parameters
-        log.logger.info("NEW de {name} (falta implementar)".format(name=program.name))
-        # TODO: loader.load, crear pcb, agregarlo a la tabla,
-        # si la cpu esta idle dispatcher.load, sino a la ready queue
+
+        # Cargamos el programa en memoria
+        baseDir = self.kernel.loader.load(program)
+
+        # Creamos el PCB y lo agregamos a la tabla
+        pid = self.kernel.pcbTable.getNewPID()
+        pcb = PCB(pid, baseDir, program.name)
+        self.kernel.pcbTable.add(pcb)
+
+        # Si la CPU está libre, ejecutamos el proceso
+        if self.kernel.runningPCB is None:
+            self.kernel.dispatcher.load(pcb)
+            pcb.state = STATE_RUNNING
+            self.kernel.runningPCB = pcb
+        else:
+            # Si está ocupada, lo agregamos a Ready
+            pcb.state = STATE_READY
+            self.kernel.readyQueue.add(pcb)
+
+        log.logger.info("NEW: {}".format(pcb))
 
 
 class KillInterruptionHandler(AbstractInterruptionHandler):
 
     def execute(self, irq):
-        log.logger.info("KILL (falta implementar)")
-        # TODO: pcb a terminated, sacar de running, buscar el proximo en ready
+        pcb = self.kernel.runningPCB
+
+        # Finalizamos el proceso actual
+        self.kernel.dispatcher.save(pcb)
+        pcb.state = STATE_TERMINATED
+
+        # Lo eliminamos de la tabla
+        self.kernel.pcbTable.remove(pcb.pid)
+        self.kernel.runningPCB = None
+
+        log.logger.info("KILL: {}".format(pcb))
+
+        # Buscamos otro proceso para ejecutar
+        if not self.kernel.readyQueue.isEmpty():
+            nextPCB = self.kernel.readyQueue.next()
+            self.kernel.dispatcher.load(nextPCB)
+            nextPCB.state = STATE_RUNNING
+            self.kernel.runningPCB = nextPCB
 
 
 class IoInInterruptionHandler(AbstractInterruptionHandler):
 
     def execute(self, irq):
-        log.logger.info("IO_IN (falta implementar)")
-        # TODO: dispatcher.save, pcb a waiting, mandarlo al ioDeviceController,
-        # buscar el proximo en ready
+        pcb = self.kernel.runningPCB
+
+        # Guardamos el estado del proceso actual
+        self.kernel.dispatcher.save(pcb)
+        pcb.state = STATE_WAITING
+        self.kernel.runningPCB = None
+
+        # Enviamos la operación al dispositivo de I/O
+        self.kernel.ioDeviceController.runOperation(
+            pcb, irq.parameters
+        )
+
+        log.logger.info("IO_IN: {}".format(pcb))
+
+        # Ejecutamos el siguiente proceso de Ready
+        if not self.kernel.readyQueue.isEmpty():
+            nextPCB = self.kernel.readyQueue.next()
+            self.kernel.dispatcher.load(nextPCB)
+            nextPCB.state = STATE_RUNNING
+            self.kernel.runningPCB = nextPCB
 
 
 class IoOutInterruptionHandler(AbstractInterruptionHandler):
 
     def execute(self, irq):
-        log.logger.info("IO_OUT (falta implementar)")
-        # TODO: getFinishedPCB, pcb a ready, si la cpu esta idle hacerlo correr,
-        # sino a la ready queue
+        # Recuperamos el proceso que terminó su I/O
+        pcb = self.kernel.ioDeviceController.getFinishedPCB()
 
+        log.logger.info("IO_OUT: {}".format(pcb))
+
+        # Si la CPU está libre, lo ejecutamos
+        if self.kernel.runningPCB is None:
+            self.kernel.dispatcher.load(pcb)
+            pcb.state = STATE_RUNNING
+            self.kernel.runningPCB = pcb
+        else:
+            # Si está ocupada, pasa a Ready
+            pcb.state = STATE_READY
+            self.kernel.readyQueue.add(pcb)
 
 # emulates the core of an Operative System
 class Kernel():
