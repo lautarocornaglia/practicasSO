@@ -202,41 +202,60 @@ class Dispatcher():
 ## ---------------------------------------------------------------
 class Scheduler():
 
+    def __init__(self):
+        self._readyQueue = []
+
     def add(self, pcb):
-        # TODO
-        pass
+        # lo agrega al final de la cola
+        self._readyQueue.append(pcb)
 
     def getNext(self):
-        # TODO
-        pass
+        # saca y devuelve el primero de la cola
+        return self._readyQueue.pop(0)
 
     def isEmpty(self):
-        # TODO
-        pass
+        return len(self._readyQueue) == 0
 
     def mustExpropiate(self, pcbInCPU, pcbToAdd):
-        # TODO (por defecto tiene que dar False)
-        pass
+        return False
 
 
 class SchedulerFCFS(Scheduler):
-    # TODO
+    # no hace falta agregar nada: ya es "el primero que llega es el primero que sale"
     pass
 
 
 class SchedulerPriorityNonPreemptive(Scheduler):
-    # TODO (con aging)
-    pass
+
+    def __init__(self, aging=True):
+        super().__init__()
+        self._aging = aging
+
+    def getNext(self):
+        # el de mejor prioridad (numero mas chico); si empatan, el que estaba primero en la cola
+        best = min(self._readyQueue, key=lambda pcb: pcb.priority)
+        self._readyQueue.remove(best)
+        # el elegido vuelve a su prioridad original
+        best.priority = best.basePriority
+        # aging: los que siguen esperando mejoran 1 (sin pasar de 1)
+        if self._aging:
+            for pcb in self._readyQueue:
+                pcb.priority = max(1, pcb.priority - 1)
+        return best
 
 
-class SchedulerPriorityPreemptive(Scheduler):
-    # TODO (con aging)
-    pass
+class SchedulerPriorityPreemptive(SchedulerPriorityNonPreemptive):
+    def mustExpropiate(self, pcbInCPU, pcbToAdd):
+        # expropia si el que llega tiene mejor prioridad (numero mas chico) que el que esta corriendo
+        return pcbToAdd.priority < pcbInCPU.priority
 
 
 class SchedulerRoundRobin(Scheduler):
-    # TODO (tiene que configurar HARDWARE.timer.quantum)
-    pass
+
+    def __init__(self, quantum):
+        super().__init__()
+        # al ponerle un quantum, el Timer se activa
+        HARDWARE.timer.quantum = quantum
 
 
 ## ---------------------------------------------------------------
