@@ -261,7 +261,9 @@ class SchedulerRoundRobin(Scheduler):
 ## ---------------------------------------------------------------
 ##  HANDLERS
 ## ---------------------------------------------------------------
+
 class AbstractInterruptionHandler():
+
     def __init__(self, kernel):
         self._kernel = kernel
 
@@ -270,55 +272,172 @@ class AbstractInterruptionHandler():
         return self._kernel
 
     def execute(self, irq):
-        log.logger.error("-- EXECUTE MUST BE OVERRIDEN in class {classname}".format(classname=self.__class__.__name__))
+        log.logger.error("EXECUTE MUST BE OVERRIDEN")
 
-    # Opcional: logica que se repite en #NEW y #IO_OUT (pasar a running o a ready segun corresponda).
-    # TODO si les sirve, hacerla aca.
+    def dispatchNext(self):
+        # Busca el siguiente proceso de Ready
+        if not self.kernel.scheduler.isEmpty():
+            pcb = self.kernel.scheduler.getNext()
+
+            self.kernel.dispatcher.load(pcb)
+            pcb.state = STATE_RUNNING
+            self.kernel.runningPCB = pcb
+
+    def addProcess(self, pcb):
+        # Se utiliza desde NEW e IO_OUT
+        running = self.kernel.runningPCB
+
+        if running is None:
+            # CPU libre
+            self.kernel.dispatcher.load(pcb)
+            pcb.state = STATE_RUNNING
+            self.kernel.runningPCB = pcb
+
+        elif self.kernel.scheduler.mustExpropiate(running, pcb):
+            # El nuevo proceso tiene mejor prioridad
+            self.kernel.dispatcher.save(running)
+            running.state = STATE_READY
+            self.kernel.scheduler.add(running)
+
+            self.kernel.dispatcher.load(pcb)
+            pcb.state = STATE_RUNNING
+            self.kernel.runningPCB = pcb
+
+        else:
+            # CPU ocupada, pasa a Ready
+            pcb.state = STATE_READY
+            self.kernel.scheduler.add(pcb)
 
 
 class NewInterruptionHandler(AbstractInterruptionHandler):
 
     def execute(self, irq):
-        # parameters = irq.parameters  ->  {'program': ..., 'priority': ...}
-        # TODO
-        pass
+        program = irq.parameters['program']
+        priority = irq.parameters['priority']
+
+        # Cargamos el programa en memoria
+        baseDir = self.kernel.loader.load(program)
+
+        # Creamos el PCB con su prioridad
+        limit = len(program.instructions) - 1
+        pid = self.kernel.pcbTable.newPid()
+
+        pcb = PCB(pid, baseDir, limit, program.name, priority)
+
+        # Lo agregamos a la tabla
+        self.kernel.pcbTable.add(pcb)
+
+        # Intentamos ejecutarlo
+        self.addProcess(pcb)
+
+        log.logger.info("NEW: {}".format(pcb))
 
 
 class KillInterruptionHandler(AbstractInterruptionHandler):
 
     def execute(self, irq):
-        # TODO
-        pass
+        pcb = self.kernel.runningPCB
+
+        if pcb is None:
+            return
+
+        # Guardamos el estado del proceso
+        self.kernel.dispatcher.save(pcb)
+
+        # Lo marcamos como terminado
+        pcb.state = STATE_TERMINATED
+        self.kernel.runningPCB = None
+
+        log.logger.info("KILL: {}".format(pcb))
+
+        # Ejecutamos el siguiente de Ready
+        self.dispatchNext()
 
 
 class IoInInterruptionHandler(AbstractInterruptionHandler):
 
     def execute(self, irq):
-        # TODO
-        pass
+        pcb = self.kernel.runningPCB
+
+        if pcb is None:
+            return
+
+        # Guardamos el proceso actual
+        self.kernel.dispatcher.save(pcb)
+
+        # Cambiamos su estado a Waiting
+        pcb.state = STATE_WAITING
+        self.kernel.runningPCB = None
+
+        # Enviamos la operacion al dispositivo
+        self.kernel.ioDeviceController.runOperation(
+            pcb, irq.parameters
+        )
+
+        log.logger.info("IO_IN: {}".format(pcb))
+
+        # Ejecutamos otro proceso
+        self.dispatchNext()
 
 
 class IoOutInterruptionHandler(AbstractInterruptionHandler):
 
     def execute(self, irq):
-        # TODO
-        pass
+        # Recuperamos el proceso que termino I/O
+        pcb = self.kernel.ioDeviceController.getFinishedPCB()
+
+        if pcb is None:
+            return
+
+        # Intentamos ejecutarlo o enviarlo a Ready
+        self.addProcess(pcb)
+
+        log.logger.info("IO_OUT: {}".format(pcb))
 
 
 class TimeOutInterruptionHandler(AbstractInterruptionHandler):
 
     def execute(self, irq):
-        # TODO
-        pass
+        pcb = self.kernel.runningPCB
+
+        if pcb is None:
+            return
+
+        # Si no hay otro proceso, renovamos el quantum
+        if self.kernel.scheduler.isEmpty():
+            HARDWARE.timer.reset()
+            return
+
+        # Guardamos el proceso actual
+        self.kernel.dispatcher.save(pcb)
+
+        # Lo devolvemos a Ready
+        pcb.state = STATE_READY
+        self.kernel.runningPCB = None
+        self.kernel.scheduler.add(pcb)
+
+        log.logger.info("TIMEOUT: {}".format(pcb))
+
+        # Ejecutamos el siguiente
+        self.dispatchNext()
 
 
 class StatInterruptionHandler(AbstractInterruptionHandler):
-    # Opcional, para el Gantt. Tick actual: HARDWARE.clock.currentTick
 
     def execute(self, irq):
-        # TODO
-        pass
+        # Registro opcional para observar la CPU
+        pcb = self.kernel.runningPCB
 
+        if pcb is None:
+            process = "IDLE"
+        else:
+            process = "PID {} ({})".format(pcb.pid, pcb.path)
+
+        log.logger.info(
+            "STAT tick {}: {}".format(
+                HARDWARE.clock.currentTick, process
+            )
+        )
 
 # emulates the core of an Operative System
 class Kernel():
